@@ -1,40 +1,47 @@
-# 📺 EGY-Stream
+# 📺 LanStream
 
-Application CLI en **Python orienté objet (OOP)** permettant de rechercher des films et séries, d'extraire automatiquement leurs flux HLS (`.m3u8`), et de lancer la lecture directement via le lecteur multimédia **MPV**.
+Application CLI moderne en **Python orienté objet (OOP)** permettant de rechercher des films et séries sur plusieurs catalogues (**Cineby / TMDB** & **Egy-Stream**), de choisir la résolution désirée (4K HDR, 1080p, 720p, 360p, Auto), d'extraire automatiquement leurs flux HLS/fMP4 déprotégés, et de les visionner :
+- En **local** via le lecteur haute-performance **MPV**
+- En **streaming Wi-Fi local** via un micro-proxy intégré compatible avec tous vos appareils (PC, smartphones, iPhone/Android, et **Smart TV Samsung / Tizen / Orsay**).
 
-Le projet inclut également un module de **sniffing avancé du trafic réseau (XHR/Fetch/Streams)** avec **Undetected ChromeDriver** et **Selenium-Wire** (navigation non-headless, contournement anti-bot et préservation de l'empreinte TLS).
+Le projet inclut également un module de **sniffing réseau headless** ultra-rapide avec détection précoce (early-exit) et interception CDP.
 
 ---
 
 ## 🚀 Fonctionnalités
 
-- 🔍 **Recherche interactive en ligne de commande** : Interroge le moteur de recherche et mappe automatiquement les titres arabes/anglais aux identifiants uniques de vidéos (`vid`).
-- 🔢 **Sélection indexée par numéros** : Présente les résultats sous forme de liste numérotée claire et permet à l'utilisateur de choisir directement par son numéro.
-- ⚡ **Extraction automatique de flux (Fast Extractor)** : Résout les iframes des hébergeurs vidéo (`1vid.xyz`, etc.) et décompresse le JavaScript obfusqué (Dean Edwards Packer) pour extraire instantanément le flux master HLS (`master.m3u8`).
-- ▶️ **Lecture directe avec MPV** : Lance la lecture plein écran avec transmission automatique des en-têtes HTTP requis (`Referer`).
-- 🕵️ **Suite de tests & Sniffer XHR (`tests/test_sniff.py`)** : Outil d'analyse pour inspecter les requêtes HTTP/HTTPS, capturer le DOM HTML et détecter les flux vidéo en direct.
-- 📂 **Dossier `output/` dédié** : Centralise tous les exports JSON, dumps HTML et historiques de requêtes.
+- 🌐 **Recherche multi-sources agrégée** : Recherche instantanée simultanée sur le catalogue international **Cineby** (via TMDB avec notes ⭐ et dates) et sur le catalogue arabe **Egy-Stream**.
+- 🔢 **Sélection indexée par numéros** : Présente les résultats sous forme de liste numérotée claire (`[cineby]`, `[egy-stream]`) pour un choix rapide au clavier.
+- 📺 **Sélecteur de résolutions interactif** : Détecte les profils disponibles dans les flux HLS master et permet de choisir entre **Auto**, **4K Ultra HD**, **1080p Full HD**, **720p HD**, ou **360p**.
+- ⚡ **Extraction automatique & Headless Sniffer** : Détecte et extrait les flux master HLS (`master.m3u8`) et fMP4 en quelques secondes via Chrome CDP sans navigation visible.
+- ▶️ **Lecture directe avec MPV** : Lance la lecture plein écran avec transmission automatique des en-têtes HTTP requis (`Referer`, `Origin`) et sélection automatique de la résolution (`--vid`).
+- 📡 **Micro-Proxy Wi-Fi & Smart TV** :
+  - **Lecteur Web HTML5 universel** : `http://<IP_LOCALE>:8080/` avec `Hls.js` et détection intelligente.
+  - **Flux Direct MP4 Rémuxé à la volée (`/stream.mp4`)** : Idéal pour les anciennes Smart TV (Samsung Série 3-5 Orsay / NetRange) sans transcodage CPU (`-c copy`).
+  - **URL Directe M3U8 (`/playlist.m3u8`)** : Réécrite à chaud pour VLC ou lecteurs IPTV.
+- 📝 **Audit & Diagnostic Réseau en temps réel** : Détection automatique des appareils connectés sur le Wi-Fi (Smart TV, mobile, PC), journalisation des transferts et télémétrie des erreurs.
 
 ---
 
 ## 📂 Architecture du Projet
 
 ```text
-EGY-Stream/
-├── main.py                     # Point d'entrée de l'application CLI (EgyStreamApp)
+LanStream/
+├── main.py                     # Point d'entrée de l'application CLI (LanStreamApp)
 ├── config.py                   # Configuration globale (URLs, en-têtes, timeouts)
 ├── requirements.txt            # Dépendances du projet
 ├── readme.md                   # Documentation complète
 ├── .gitignore
 ├── models/
 │   ├── __init__.py
-│   └── video.py                # Modèle de données Video (ID, titre, URL page, flux)
+│   └── video.py                # Modèle de données Video (ID, titre, provider, résolutions)
 ├── services/
 │   ├── __init__.py
-│   ├── search_service.py       # Recherche & mapping des vidéos par nom
-│   ├── extractor_service.py    # Déobfuscation & extraction du flux .m3u8
-│   ├── player_service.py       # Contrôleur de lecture via MPV
-│   └── stream_proxy_service.py # Micro-Proxy HTTP/HLS local pour partage Wi-Fi (Option A)
+│   ├── search_service.py       # Recherche multi-sources (TMDB/Cineby + Egy-Stream)
+│   ├── extractor_service.py    # Déobfuscation, sniffer headless CDP & parseur de résolutions
+│   ├── player_service.py       # Contrôleur de lecture via MPV avec sélection de piste vidéo
+│   ├── stream_proxy_service.py # Micro-Proxy HTTP/HLS local pour partage Wi-Fi & Smart TV
+│   └── device_logger_service.py# Suivi et audit télémétrique des appareils connectés
 ├── utils/
 │   ├── __init__.py
 │   ├── logger.py               # Logger formaté
@@ -42,8 +49,8 @@ EGY-Stream/
 ├── tests/
 │   ├── __init__.py
 │   ├── test_extractor.py       # Tests unitaires de recherche et d'extraction
-│   ├── test_proxy.py           # Tests unitaires du micro-proxy LAN
-│   └── test_sniff.py           # Outil de sniffing réseau (Undetected Chrome / Selenium-Wire)
+│   ├── test_proxy.py           # Tests unitaires du micro-proxy LAN et réécriture fMP4
+│   └── test_sniff.py           # Outil de sniffing réseau autonome
 └── output/
     └── .gitkeep                # Répertoire de stockage des fichiers générés
 ```
@@ -58,6 +65,8 @@ EGY-Stream/
    - **Ubuntu / Debian** : `sudo apt install mpv`
    - **Arch Linux** : `sudo pacman -S mpv`
    - **macOS** : `brew install mpv`
+3. **FFmpeg** (requis pour le mode Direct MP4 / Smart TV) :
+   - `sudo apt install ffmpeg` ou `sudo dnf install ffmpeg`
 
 ---
 
@@ -65,8 +74,8 @@ EGY-Stream/
 
 1. Clonez ce dépôt et rendez-vous dans le dossier :
    ```bash
-   git clone https://github.com/SenhajiAhmed/EGY-Stream.git
-   cd EGY-Stream
+   git clone https://github.com/SenhajiAhmed/LanStream.git
+   cd LanStream
    ```
 
 2. Créez et activez un environnement virtuel :
