@@ -1,8 +1,24 @@
-/search_results.json
-/video_data.json
-
-demo
-
-# Ignore Python bytecode caches in all folders
+# Python Bytecode
 __pycache__/
 **/__pycache__/
+*.py[cod]
+
+# Virtual Environments
+.venv/
+env/
+venv/
+
+# Undetected Chrome Cache
+.uc_data/
+**/.uc_data/
+
+# Dynamic Outputs & Dumps
+output/*
+!output/.gitkeep
+search_results.json
+video_data.json
+
+# IDE / Editor Files
+.vscode/
+.idea/
+*.swp
