@@ -3,7 +3,8 @@ Stream Extractor Service
 """
 import os
 import re
-from typing import Optional
+import urllib.parse
+from typing import Optional, List, Dict, Any
 import requests
 
 from config import DEFAULT_HEADERS, DEFAULT_TIMEOUT
@@ -198,3 +199,71 @@ class ExtractorService:
             return master
 
         return None
+
+    def parse_hls_resolutions(self, master_url: str, referer: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Parses available video resolutions from an HLS master playlist."""
+        if not master_url or ".m3u8" not in master_url.lower():
+            return []
+
+        headers = dict(DEFAULT_HEADERS)
+        if referer:
+            headers["Referer"] = referer
+            if "cinejoy" in referer or "cineby" in referer:
+                headers["Origin"] = referer.rstrip("/")
+
+        try:
+            resp = self.session.get(master_url, headers=headers, timeout=10)
+            if resp.status_code != 200:
+                return []
+            text = resp.text
+        except Exception as e:
+            if self.logger:
+                self.logger.error(f"Failed to fetch master playlist for resolutions: {e}")
+            return []
+
+        resolutions = []
+        matches = list(re.finditer(r'#EXT-X-STREAM-INF:([^\n]+)\n([^\n]+)', text))
+        for vid_idx, match in enumerate(matches, start=1):
+            inf = match.group(1)
+            sub_url = match.group(2).strip()
+            if not sub_url.startswith("http"):
+                sub_url = urllib.parse.urljoin(master_url, sub_url)
+
+            res_m = re.search(r'RESOLUTION=(\d+)x(\d+)', inf)
+            bw_m = re.search(r'BANDWIDTH=(\d+)', inf)
+
+            width = int(res_m.group(1)) if res_m else 0
+            height = int(res_m.group(2)) if res_m else 0
+            bw = int(bw_m.group(1)) if bw_m else 0
+
+            # Format friendly label
+            hdr = "HDR " if "VIDEO-RANGE=PQ" in inf else ""
+            codec = "HEVC" if "hvc" in inf else "H.264"
+            if height >= 2160:
+                name = f"4K Ultra HD ({width}x{height}, {hdr}{codec})"
+            elif height >= 1080:
+                name = f"1080p Full HD ({width}x{height}, {codec})"
+            elif height >= 720:
+                name = f"720p HD ({width}x{height}, {codec})"
+            elif height >= 480:
+                name = f"480p SD ({width}x{height}, {codec})"
+            elif height > 0:
+                name = f"{height}p ({width}x{height}, {codec})"
+            else:
+                name = f"Flux #{vid_idx} ({codec})"
+
+            if bw > 0:
+                mbps = round(bw / 1000000, 1)
+                name += f" - {mbps} Mbps"
+
+            resolutions.append({
+                "index": vid_idx,
+                "name": name,
+                "width": width,
+                "height": height,
+                "bandwidth": bw,
+                "codec": codec,
+                "url": sub_url
+            })
+
+        return resolutions

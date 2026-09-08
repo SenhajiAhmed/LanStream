@@ -103,3 +103,32 @@ class TerminalUI:
                 print("\nExiting...")
                 sys.exit(0)
 
+    @classmethod
+    def prompt_resolution(cls, resolutions: list) -> Optional[dict]:
+        """Displays available resolutions and lets the user choose one."""
+        if not resolutions:
+            return None
+
+        print(f"\n{cls.BOLD}{cls.GREEN}📺 Available Video Resolutions:{cls.RESET}")
+        print("─" * 65)
+        print(f"  {cls.BOLD}{cls.CYAN} 1.{cls.RESET} ⚡ Auto / Adaptive (Auto quality switching based on network)")
+        for idx, res in enumerate(resolutions, start=2):
+            rec = f" {cls.YELLOW}[Recommended]{cls.RESET}" if res.get("height") == 1080 else ""
+            print(f"  {cls.BOLD}{cls.CYAN}{idx:2d}.{cls.RESET} {res['name']}{rec}")
+        print("─" * 65)
+
+        max_val = len(resolutions) + 1
+        while True:
+            try:
+                raw = input(f"\n{cls.BOLD}{cls.YELLOW}👉 Select resolution [1-{max_val}] (Press Enter for Auto): {cls.RESET}").strip()
+                if not raw or raw == "1":
+                    return None  # Auto / Default master
+                choice = int(raw)
+                if 2 <= choice <= max_val:
+                    return resolutions[choice - 2]
+                print(f"{cls.RED}⚠ Please enter a number between 1 and {max_val}.{cls.RESET}")
+            except ValueError:
+                print(f"{cls.RED}⚠ Invalid input. Please enter a valid number.{cls.RESET}")
+            except (KeyboardInterrupt, EOFError):
+                return None
+

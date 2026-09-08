@@ -19,6 +19,8 @@ class Video:
     rating: Optional[float] = None
     year: Optional[str] = None
     overview: Optional[str] = None
+    selected_resolution: Optional[Dict[str, Any]] = None
+    selected_vid: Optional[int] = None
 
     def __str__(self) -> str:
         tag = f"[{self.provider}] " if self.provider else ""

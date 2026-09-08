@@ -51,6 +51,11 @@ class PlayerService:
         if video.title:
             cmd.append(f"--force-media-title={video.title}")
 
+        if getattr(video, "selected_vid", None):
+            cmd.append(f"--vid={video.selected_vid}")
+        elif getattr(video, "selected_resolution", None) and video.selected_resolution.get("bandwidth"):
+            cmd.append(f"--hls-bitrate={video.selected_resolution['bandwidth']}")
+
         cmd.append(target_url)
 
         if self.logger:

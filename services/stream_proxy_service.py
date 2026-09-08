@@ -480,8 +480,17 @@ class StreamProxyHandler(http.server.BaseHTTPRequestHandler):
             "-i", self.video.stream_url,
         ]
 
-        # For multi-bitrate HLS (like Cineby), prioritize 1080p H.264 (Program 1) over 4K HEVC (Program 0) for old TV compatibility
-        if "moviebox" in (self.video.stream_url or "") or "cinejoy" in self.upstream_referer or "cineby" in self.upstream_referer:
+        # If user explicitly selected a resolution, map that specific program/track
+        if getattr(self.video, "selected_vid", None):
+            prog_idx = self.video.selected_vid - 1
+            cmd.extend([
+                "-map", f"0:p:{prog_idx}:v?",
+                "-map", f"0:p:{prog_idx}:a?",
+                "-map", f"0:v:{prog_idx}?",
+                "-map", "0:a:0?",
+            ])
+        elif "moviebox" in (self.video.stream_url or "") or "cinejoy" in self.upstream_referer or "cineby" in self.upstream_referer:
+            # For Cineby default, prioritize 1080p H.264 (Program 1) over 4K HEVC (Program 0) for TV compatibility
             cmd.extend([
                 "-map", "0:p:1:v?",
                 "-map", "0:p:1:a?",

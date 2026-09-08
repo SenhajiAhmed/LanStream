@@ -72,6 +72,18 @@ class EgyStreamApp:
                     print(f"❌ Failed to extract stream URL for {selected_video.title}.")
                     continue
 
+                # Check for available video resolutions in HLS playlist
+                resolutions = self.extractor_service.parse_hls_resolutions(
+                    master_url=stream_url,
+                    referer=selected_video.embed_url or selected_video.page_url
+                )
+                if len(resolutions) > 1:
+                    chosen_res = TerminalUI.prompt_resolution(resolutions)
+                    if chosen_res:
+                        selected_video.selected_resolution = chosen_res
+                        selected_video.selected_vid = chosen_res["index"]
+                        print(f"✅ Selected resolution: {chosen_res['name']}")
+
                 # Choose playback / sharing mode
                 if self.share_mode:
                     action = "2"
