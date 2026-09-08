@@ -467,16 +467,37 @@ class StreamProxyHandler(http.server.BaseHTTPRequestHandler):
         is_mp4 = format == "mp4"
         content_type = "video/mp4" if is_mp4 else "video/mp2t"
 
+        headers_str = f"Referer: {self.upstream_referer}\r\nUser-Agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36\r\n"
+        if "cinejoy" in self.upstream_referer or "cineby" in self.upstream_referer or "moviebox" in (self.video.stream_url or ""):
+            origin = self.upstream_referer.rstrip("/")
+            headers_str = f"Referer: {self.upstream_referer}\r\nOrigin: {origin}\r\nUser-Agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36\r\n"
+
         cmd = [
             "ffmpeg",
             "-loglevel", "error",
-            "-headers", f"Referer: {self.upstream_referer}\r\nUser-Agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36\r\n",
+            "-extension_picky", "0",
+            "-headers", headers_str,
             "-i", self.video.stream_url,
-            "-map", "0:v:0",
-            "-map", "0:a:0",
+        ]
+
+        # For multi-bitrate HLS (like Cineby), prioritize 1080p H.264 (Program 1) over 4K HEVC (Program 0) for old TV compatibility
+        if "moviebox" in (self.video.stream_url or "") or "cinejoy" in self.upstream_referer or "cineby" in self.upstream_referer:
+            cmd.extend([
+                "-map", "0:p:1:v?",
+                "-map", "0:p:1:a?",
+                "-map", "0:v:0?",
+                "-map", "0:a:0?",
+            ])
+        else:
+            cmd.extend([
+                "-map", "0:v:0",
+                "-map", "0:a:0",
+            ])
+
+        cmd.extend([
             "-c:v", "copy",
             "-c:a", "copy",
-        ]
+        ])
 
         if is_mp4:
             cmd.extend([
