@@ -77,6 +77,7 @@ class EgyStreamApp:
                     master_url=stream_url,
                     referer=selected_video.embed_url or selected_video.page_url
                 )
+                selected_video.available_resolutions = resolutions
                 if len(resolutions) > 1:
                     chosen_res = TerminalUI.prompt_resolution(resolutions)
                     if chosen_res:

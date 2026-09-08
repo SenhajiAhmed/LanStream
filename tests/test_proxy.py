@@ -149,6 +149,61 @@ class TestStreamProxy(unittest.TestCase):
         r.close()
         print("[Test] Direct MP4 stream verified successfully with ftyp box at:", mp4_url)
 
+    def test_m3u8_rewrite_fmp4_and_media_tags(self):
+        """Tests that #EXT-X-MAP and #EXT-X-MEDIA URIs are properly rewritten through proxy."""
+        from services.stream_proxy_service import StreamProxyHandler
+        master = (
+            "#EXTM3U\n"
+            "#EXT-X-VERSION:7\n"
+            "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"audio-1\",NAME=\"English\",URI=\"audio_1.m3u8\"\n"
+            "#EXT-X-STREAM-INF:BANDWIDTH=800000,RESOLUTION=640x360,AUDIO=\"audio-1\"\n"
+            "video_360p.m3u8\n"
+        )
+        rewritten = StreamProxyHandler._rewrite_m3u8_content(
+            master, "https://cdn.example.com/playlist/master.m3u8", proxy_base="http://127.0.0.1:8080"
+        )
+        self.assertIn("URI=\"http://127.0.0.1:8080/proxy?url=https%3A%2F%2Fcdn.example.com%2Fplaylist%2Faudio_1.m3u8\"", rewritten)
+        self.assertIn("http://127.0.0.1:8080/proxy?url=https%3A%2F%2Fcdn.example.com%2Fplaylist%2Fvideo_360p.m3u8", rewritten)
+
+        media = (
+            "#EXTM3U\n"
+            "#EXT-X-VERSION:7\n"
+            "#EXT-X-MAP:URI=\"video_360p_init.html\"\n"
+            "#EXTINF:6.000,\n"
+            "video_360p_000.html\n"
+        )
+        rewritten_media = StreamProxyHandler._rewrite_m3u8_content(
+            media, "https://cdn.example.com/playlist/video_360p.m3u8", proxy_base="http://127.0.0.1:8080"
+        )
+        self.assertIn("URI=\"http://127.0.0.1:8080/proxy?url=https%3A%2F%2Fcdn.example.com%2Fplaylist%2Fvideo_360p_init.html\"", rewritten_media)
+        self.assertIn("http://127.0.0.1:8080/proxy?url=https%3A%2F%2Fcdn.example.com%2Fplaylist%2Fvideo_360p_000.html", rewritten_media)
+        print("[Test] fMP4 map and media tags rewrite verified successfully")
+
+    def test_m3u8_rewrite_variant_filtering(self):
+        """Tests that when selected_vid is provided, only that variant is kept in master playlist."""
+        from services.stream_proxy_service import StreamProxyHandler
+        master = (
+            "#EXTM3U\n"
+            "#EXT-X-VERSION:7\n"
+            "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"audio-1\",NAME=\"English\",URI=\"audio_1.m3u8\"\n"
+            "#EXT-X-STREAM-INF:BANDWIDTH=5000000,RESOLUTION=3840x2160,AUDIO=\"audio-1\"\n"
+            "video_4k.m3u8\n"
+            "#EXT-X-STREAM-INF:BANDWIDTH=2500000,RESOLUTION=1920x1080,AUDIO=\"audio-1\"\n"
+            "video_1080p.m3u8\n"
+            "#EXT-X-STREAM-INF:BANDWIDTH=800000,RESOLUTION=640x360,AUDIO=\"audio-1\"\n"
+            "video_360p.m3u8\n"
+        )
+        # Select 360p (variant 3)
+        rewritten = StreamProxyHandler._rewrite_m3u8_content(
+            master, "https://cdn.example.com/master.m3u8", proxy_base="http://127.0.0.1:8080", selected_vid=3
+        )
+        self.assertIn("video_360p.m3u8", rewritten)
+        self.assertNotIn("video_4k.m3u8", rewritten)
+        self.assertNotIn("video_1080p.m3u8", rewritten)
+        # Audio track must be preserved
+        self.assertIn("audio_1.m3u8", rewritten)
+        print("[Test] Master playlist variant filtering verified successfully")
+
 
 if __name__ == "__main__":
     unittest.main()

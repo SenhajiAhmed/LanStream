@@ -2,7 +2,7 @@
 Video Data Model
 """
 from dataclasses import dataclass
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 
 
 @dataclass
@@ -21,6 +21,7 @@ class Video:
     overview: Optional[str] = None
     selected_resolution: Optional[Dict[str, Any]] = None
     selected_vid: Optional[int] = None
+    available_resolutions: Optional[List[Dict[str, Any]]] = None
 
     def __str__(self) -> str:
         tag = f"[{self.provider}] " if self.provider else ""

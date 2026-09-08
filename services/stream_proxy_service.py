@@ -393,8 +393,14 @@ class StreamProxyHandler(http.server.BaseHTTPRequestHandler):
                     currentHls.on(Hls.Events.ERROR, function(event, data) {{
                         reportTelemetry("hls_error", data.type + " : " + (data.details || ""), data);
                         if (data && data.fatal) {{
-                            updateStatus("⚠️ Erreur Hls.js. Bascule sur HLS Natif...", true);
-                            switchMode('native_hls');
+                            if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {{
+                                currentHls.recoverMediaError();
+                            }} else if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {{
+                                currentHls.startLoad();
+                            }} else {{
+                                updateStatus("⚠️ Erreur Hls.js. Bascule sur HLS Natif...", true);
+                                switchMode('native_hls');
+                            }}
                         }}
                     }});
                 }} else {{
@@ -480,27 +486,35 @@ class StreamProxyHandler(http.server.BaseHTTPRequestHandler):
             "-i", self.video.stream_url,
         ]
 
-        # If user explicitly selected a resolution, map that specific program/track
+        # Select strictly 1 video stream and 1 audio stream to ensure Samsung TV / browser compatibility
         if getattr(self.video, "selected_vid", None):
             prog_idx = self.video.selected_vid - 1
             cmd.extend([
-                "-map", f"0:p:{prog_idx}:v?",
-                "-map", f"0:p:{prog_idx}:a?",
-                "-map", f"0:v:{prog_idx}?",
+                "-map", f"0:p:{prog_idx}:v:0",
+                "-map", "0:a:0?",
+            ])
+        elif getattr(self.video, "available_resolutions", None) and len(self.video.available_resolutions) > 0:
+            # Auto: prefer 1080p if available, else first resolution program
+            res_list = self.video.available_resolutions
+            best_idx = 1
+            for r in res_list:
+                if r.get("height") == 1080:
+                    best_idx = r["index"]
+                    break
+            prog_idx = best_idx - 1
+            cmd.extend([
+                "-map", f"0:p:{prog_idx}:v:0",
                 "-map", "0:a:0?",
             ])
         elif "moviebox" in (self.video.stream_url or "") or "cinejoy" in self.upstream_referer or "cineby" in self.upstream_referer:
-            # For Cineby default, prioritize 1080p H.264 (Program 1) over 4K HEVC (Program 0) for TV compatibility
             cmd.extend([
-                "-map", "0:p:1:v?",
-                "-map", "0:p:1:a?",
-                "-map", "0:v:0?",
+                "-map", "0:p:1:v:0",
                 "-map", "0:a:0?",
             ])
         else:
             cmd.extend([
                 "-map", "0:v:0",
-                "-map", "0:a:0",
+                "-map", "0:a:0?",
             ])
 
         cmd.extend([
@@ -591,7 +605,8 @@ class StreamProxyHandler(http.server.BaseHTTPRequestHandler):
 
         host = self.headers.get("Host", f"127.0.0.1:{self.server.server_port}")
         proxy_base = f"http://{host}"
-        rewritten = self._rewrite_m3u8_content(content, m3u8_url, proxy_base=proxy_base)
+        selected_vid = getattr(self.video, "selected_vid", None)
+        rewritten = self._rewrite_m3u8_content(content, m3u8_url, proxy_base=proxy_base, selected_vid=selected_vid)
         encoded = rewritten.encode("utf-8")
 
         self.send_response(200)
@@ -648,13 +663,13 @@ class StreamProxyHandler(http.server.BaseHTTPRequestHandler):
             self.device_logger.on_error(client_ip, self.path, type(last_exc).__name__, str(last_exc), {"upstream_url": upstream_url})
             return
 
-        # If upstream is another m3u8 playlist, rewrite it on the fly with absolute URLs
+        # If upstream is an m3u8 playlist, rewrite it on the fly with absolute URLs
         content_type = upstream_resp.headers.get("Content-Type", "").lower()
-        if "mpegurl" in content_type or ".m3u8" in upstream_url.lower():
+        if "mpegurl" in content_type or ".m3u8" in upstream_url.lower() or upstream_resp.text.strip().startswith("#EXTM3U"):
             text = upstream_resp.text
             host = self.headers.get("Host", f"127.0.0.1:{self.server.server_port}")
             proxy_base = f"http://{host}"
-            rewritten = self._rewrite_m3u8_content(text, upstream_url, proxy_base=proxy_base)
+            rewritten = self._rewrite_m3u8_content(text, upstream_url, proxy_base=proxy_base, selected_vid=None)
             encoded = rewritten.encode("utf-8")
 
             self.send_response(200)
@@ -672,15 +687,39 @@ class StreamProxyHandler(http.server.BaseHTTPRequestHandler):
 
         # Deliver clean complete segment / key to client
         content = upstream_resp.content
-        self.send_response(upstream_resp.status_code)
-        for key in ["Content-Type", "Content-Range", "Accept-Ranges"]:
-            if key in upstream_resp.headers:
-                self.send_header(key, upstream_resp.headers[key])
+        url_lower = upstream_url.lower()
 
-        self.send_header("Content-Length", str(len(content)))
+        # Determine proper MIME type, overriding upstream text/html disguise (MovieBox CDN)
         if is_key:
-            self.send_header("Content-Type", "application/octet-stream")
+            mime_type = "application/octet-stream"
+        elif "audio" in url_lower:
+            mime_type = "audio/mp4"
+        elif ".ts" in url_lower:
+            mime_type = "video/mp2t"
+        elif ".vtt" in url_lower:
+            mime_type = "text/vtt"
+        elif any(ext in url_lower for ext in [".m4s", ".mp4", "video", "init"]) or ".html" in url_lower:
+            mime_type = "video/mp4"
+        else:
+            upstream_ct = upstream_resp.headers.get("Content-Type", "")
+            if not upstream_ct or "text/html" in upstream_ct.lower() or "text/plain" in upstream_ct.lower():
+                mime_type = "video/mp4"
+            else:
+                mime_type = upstream_ct
+
+        self.send_response(upstream_resp.status_code)
+        self.send_header("Content-Type", mime_type)
+        self.send_header("Content-Length", str(len(content)))
+
+        if "Content-Range" in upstream_resp.headers:
+            self.send_header("Content-Range", upstream_resp.headers["Content-Range"])
+        if "Accept-Ranges" in upstream_resp.headers:
+            self.send_header("Accept-Ranges", upstream_resp.headers["Accept-Ranges"])
+
+        if is_key:
             self.send_header("Cache-Control", "public, max-age=86400")
+        else:
+            self.send_header("Cache-Control", "public, max-age=3600")
 
         self._send_cors_headers()
         self.end_headers()
@@ -698,31 +737,62 @@ class StreamProxyHandler(http.server.BaseHTTPRequestHandler):
             )
 
     @classmethod
-    def _rewrite_m3u8_content(cls, content: str, base_url: str, proxy_base: str = "") -> str:
-        """Rewrites m3u8 URI lines to route through the local proxy using full absolute URLs."""
+    def _rewrite_m3u8_content(cls, content: str, base_url: str, proxy_base: str = "", selected_vid: Optional[int] = None) -> str:
+        """Rewrites m3u8 URI lines to route through the local proxy using full absolute URLs.
+
+        Handles:
+        - Tag URIs: #EXT-X-KEY, #EXT-X-MAP, #EXT-X-MEDIA, etc.
+        - Segment and playlist URLs
+        - Variant stream filtering when selected_vid is specified
+        """
+        # Validate selected_vid against available variants
+        if selected_vid is not None:
+            total_variants = sum(1 for l in content.splitlines() if l.strip().startswith("#EXT-X-STREAM-INF:"))
+            if selected_vid < 1 or selected_vid > total_variants:
+                selected_vid = None
+
         lines = []
+        stream_inf_idx = 0
+        skip_next_uri = False
+
+        def _replace_uri(m):
+            orig_uri = m.group(1) or m.group(2) or m.group(3)
+            full_uri = urllib.parse.urljoin(base_url, orig_uri)
+            encoded = urllib.parse.quote(full_uri, safe="")
+            return f'URI="{proxy_base}/proxy?url={encoded}"'
+
         for line in content.splitlines():
             s = line.strip()
             if not s:
                 continue
 
-            # Rewrite AES-128 key URI: #EXT-X-KEY:METHOD=AES-128,URI="https://..."
-            if s.startswith("#EXT-X-KEY:"):
-                def replace_key_uri(match):
-                    orig_uri = match.group(1)
-                    full_uri = urllib.parse.urljoin(base_url, orig_uri)
-                    return f'URI="{proxy_base}/proxy?url={urllib.parse.quote(full_uri, safe="")}"'
-                s = re.sub(r'URI=["\']([^"\']+)["\']', replace_key_uri, s)
+            # Variant streams in master playlist
+            if s.startswith("#EXT-X-STREAM-INF:"):
+                stream_inf_idx += 1
+                if selected_vid is not None and stream_inf_idx != selected_vid:
+                    skip_next_uri = True
+                    continue
+                skip_next_uri = False
+                if "URI=" in s:
+                    s = re.sub(r'URI=(?:"([^"]+)"|\'([^\']+)\'|([^\s,]+))', _replace_uri, s)
                 lines.append(s)
+                continue
 
-            # Metadata tags stay unchanged
-            elif s.startswith("#"):
+            # If previous variant stream was skipped, skip its target URL line
+            if skip_next_uri:
+                skip_next_uri = False
+                continue
+
+            # Tag line: rewrite any URI attributes (e.g. #EXT-X-KEY, #EXT-X-MAP, #EXT-X-MEDIA)
+            if s.startswith("#"):
+                if "URI=" in s:
+                    s = re.sub(r'URI=(?:"([^"]+)"|\'([^\']+)\'|([^\s,]+))', _replace_uri, s)
                 lines.append(s)
-
             # Media segment or sub-playlist URL
             else:
                 full_uri = urllib.parse.urljoin(base_url, s)
-                lines.append(f"{proxy_base}/proxy?url={urllib.parse.quote(full_uri, safe='')}")
+                encoded = urllib.parse.quote(full_uri, safe="")
+                lines.append(f"{proxy_base}/proxy?url={encoded}")
 
         return "\n".join(lines)
 
