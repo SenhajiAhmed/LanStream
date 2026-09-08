@@ -134,6 +134,93 @@ python main.py --debug
 
 ---
 
+## 📺 Le Défi du Streaming sur Smart TV : Problèmes & Solutions Architecturales
+
+Diffuser un flux vidéo moderne vers un téléviseur connecté (notamment les **anciennes Smart TV Samsung Série 3-5 / Orsay / Tizen ancien**, ou tout téléviseur avec un navigateur WebKit limité) pose des défis techniques majeurs que les lecteurs web et proxies classiques ne peuvent pas surmonter directement.
+
+Voici l'analyse détaillée des problèmes rencontrés et des solutions d'ingénierie implémentées dans **LanStream**.
+
+---
+
+### 1. ⚠️ Les Problèmes Rencontrés sur Smart TV
+
+| Problème | Symptôme / Erreur | Cause Technique |
+| :--- | :--- | :--- |
+| **Masquage CDN & Faux MIME Type** | `networkError: fragLoadError`<br>`audioTrackLoadError` | Certains CDN (notamment MovieBox / Cineby) déguisent leurs fragments fMP4 avec des extensions `.html` et renvoient un en-tête `Content-Type: text/html; charset=utf-8`. Les moteurs TV et Hls.js rejettent immédiatement ces segments. |
+| **Balises fMP4 relatives ignorées** | `HTTP 404 Not Found`<br>sur `/video_init.html` ou `/audio.m3u8` | Les balises d'initialisation fMP4 (`#EXT-X-MAP:URI="..."`) et de pistes audio (`#EXT-X-MEDIA:TYPE=AUDIO,...,URI="..."`) contenaient des chemins relatifs non résolus par les proxies basiques. |
+| **Collision Multi-Pistes FFmpeg** | `BrokenPipeError: bytes_streamed: 65536`<br>`MEDIA_ERR_SRC_NOT_SUPPORTED` | Sur les films multi-langues et multi-résolutions (ex: *Titanic*), un mapping FFmpeg cumulatif (`-map 0:p:...` + `-map 0:v:...`) injectait **2 flux vidéo** et **5 flux audio** simultanément dans le MP4. Les puces matérielles TV crachaient dès le 1er bloc de 64 KB. |
+| **Incompatibilité Codec 4K HEVC** | Écran noir / Image figée / Son seul | Les masters 4K proposent du HEVC/H.265 (Program 0). Les puces vidéo des téléviseurs de génération précédente ne décodent matériellement que le H.264 (AVC) jusqu'à 1080p. |
+| **Restrictions CORS & Chiffrement AES-128** | Échec de lecture / Erreur DRM | Les requêtes vers les clés AES-128 (`#EXT-X-KEY`) et segments tiers sont bloquées par les règles de sécurité réseau strictes du navigateur TV. |
+
+---
+
+### 2. 🛠️ Les Solutions Déployées dans LanStream
+
+```text
+                                       ┌─────────────────────────────────────────────────────────┐
+                                       │                   LanStream Micro-Proxy                 │
+                                       │                                                         │
+  ┌──────────────────────┐             │   1. Détection intelligente des balises (#EXT-X-MAP/KEY)│
+  │     Upstream CDN     │             │   2. Sanitisation MIME Type (text/html ➔ video/mp4)     │
+  │  (fMP4, AES-128,     │ ──────────► │   3. Filtrage dynamique par résolution choisie          │
+  │   Segments obfusqués)│             │   4. Rémuxage FFmpeg strict (1 vidéo + 1 audio)         │
+  └──────────────────────┘             └────────────────────────────┬────────────────────────────┘
+                                                                    │
+                                    ┌───────────────────────────────┴────────────────────────────┐
+                                    ▼                                                            ▼
+                     ┌─────────────────────────────┐                              ┌─────────────────────────────┐
+                     │   Lecteur Web / Hls.js      │                              │  Samsung Smart TV (Orsay)   │
+                     │   Auto-guérison & HLS Natif │                              │  Direct MP4 unifié (0% CPU) │
+                     └─────────────────────────────┘                              └─────────────────────────────┘
+```
+
+#### A. Moteur de Réécriture Approfondie des Balises HLS
+Le micro-proxy ne se contente pas de relayer les URLs de segments : il inspecte et réécrit **toutes les balises d'attributs `URI="..."`** de la norme HLS :
+```text
+Flux distant (Relatif)                           Flux réécrit par LanStream (Absolu & Proxifié)
+────────────────────────────────────────────────────────────────────────────────────────────
+#EXT-X-MAP:URI="video_360p_init.html"      ──►   #EXT-X-MAP:URI="http://192.168.1.X:8080/proxy?url=https%3A%2F%2F...init.html"
+#EXT-X-MEDIA:TYPE=AUDIO,URI="audio_1.m3u8" ──►   #EXT-X-MEDIA:TYPE=AUDIO,URI="http://192.168.1.X:8080/proxy?url=https%3A%2F%2F...audio_1.m3u8"
+#EXT-X-KEY:METHOD=AES-128,URI="key.key"    ──►   #EXT-X-KEY:METHOD=AES-128,URI="http://192.168.1.X:8080/proxy?url=https%3A%2F%2F...key.key"
+```
+Résultat : les fichiers d'init fMP4 et les playlists audio séparées sont servis de manière transparente sans aucune erreur 404.
+
+#### B. Sanitisation Automatique des Types MIME
+Le composant `_proxy_upstream` inspecte la nature des flux et remplace dynamiquement les faux en-têtes `text/html` par les véritables types MIME attendus par les décodeurs :
+- Fragments vidéo fMP4 / TS : `video/mp4` ou `video/mp2t`
+- Pistes audio fMP4 : `audio/mp4`
+- Sous-titres : `text/vtt`
+- Clés AES-128 : `application/octet-stream` avec mise en cache mémoire RAM instantanée.
+
+#### C. Remuxing FFmpeg Haute-Précision à Flux Unique (`/stream.mp4`)
+Pour les téléviseurs dépourvus de support MSE moderne, `/stream.mp4` effectue un remuxing pass-through (`-c:v copy -c:a copy` à 0% de charge CPU) avec isolation stricte :
+```python
+# Sélection stricte d'UN SEUL flux vidéo et d'UN SEUL flux audio
+if getattr(self.video, "selected_vid", None):
+    prog_idx = self.video.selected_vid - 1
+    cmd.extend(["-map", f"0:p:{prog_idx}:v:0", "-map", "0:a:0?"])
+elif getattr(self.video, "available_resolutions", None):
+    # Auto : Sélection intelligente du flux 1080p H.264 (ou 1er disponible)
+    cmd.extend(["-map", f"0:p:{prog_1080p}:v:0", "-map", "0:a:0?"])
+else:
+    cmd.extend(["-map", "0:v:0", "-map", "0:a:0?"])
+```
+Le conteneur MP4 transmis au téléviseur ne contient **qu'une seule piste vidéo fluide et une seule piste audio**, éliminant instantanément toute fermeture de socket (`BrokenPipeError` à 64 KB) et assurant un démarrage immédiat.
+
+#### D. Filtrage Dynamique de la Playlist Maître par Résolution
+Lorsque l'utilisateur sélectionne une résolution (ex: `360p` ou `1080p`), `/playlist.m3u8` isole fidèlement le variant choisi tout en reliant la piste audio appropriée :
+- Aucun gaspillage de bande passante.
+- Prévention du basculement automatique forcé vers du 4K HEVC non supporté par la TV.
+
+#### E. Télémétrie Côté Client & Auto-Guérison
+Le lecteur HTML5 embarqué intègre une logique d'auto-récupération d'erreurs :
+- `Hls.ErrorTypes.MEDIA_ERROR` ➔ Déclenche automatiquement `currentHls.recoverMediaError()`
+- `Hls.ErrorTypes.NETWORK_ERROR` ➔ Déclenche automatiquement `currentHls.startLoad()`
+- Échec irrémédiable ➔ Bascule silencieuse et transparente vers le mode matériel natif.
+- Chaque incident est consigné en temps réel dans la console hôte et dans `output/devices_activity.log` via l'API interne `POST /api/log`.
+
+---
+
 ## 🧪 Tests & Analyse Réseau (XHR Sniffing)
 
 Le dossier `tests/` contient les outils de test et d'analyse :
