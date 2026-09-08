@@ -221,6 +221,21 @@ Le lecteur HTML5 embarqué intègre une logique d'auto-récupération d'erreurs 
 
 ---
 
+### 3. 🛡️ Tolérance aux Pannes & Résilience Réseau (Stream Jamais Perdu)
+
+Si votre connexion Internet subit des micro-coupures, des variations de débit ou une panne temporaire, **LanStream déploie une stratégie de résilience à plusieurs niveaux** afin que votre stream et votre progression ne soient jamais perdus :
+
+| Composant | Mécanisme de Résilience | Comportement lors d'une Panne Réseau |
+| :--- | :--- | :--- |
+| **Micro-Proxy Local (Serveur)** | **Cache LRU Mémoire RAM** (35 segments) | Les derniers segments fMP4/TS et clés de déchiffrement AES restent en mémoire. Lors d'un buffering ou d'un retour arrière, le flux est servi immédiatement sans solliciter le réseau externe. |
+| **Micro-Proxy Local (Serveur)** | **Retry Exponentiel Automatique** (jusqu'à 6 tentatives) | Face à une déconnexion du CDN distant (timeouts, erreurs 502/503), le proxy temporise avec backoff progressif (fenêtre de résilience de 15 à 20 secondes) au lieu d'interrompre le flux. |
+| **Mode Direct MP4 (Smart TV)** | **Reconnexion Native FFmpeg** (`-reconnect 1`) | Pour les téléviseurs recevant `/stream.mp4`, FFmpeg rétablit automatiquement les sockets interrompues sans casser le conteneur MP4 diffusé à l'écran. |
+| **Lecteur Web HTML5** | **Tamponnage Prédictif Profond** (60s à 120s) | Pré-charge jusqu'à 2 minutes de vidéo d'avance en mémoire tampon (`maxBufferLength: 60`, `maxMaxBufferLength: 120`). Une coupure de 60 secondes passe **totalement inaperçue** pour l'utilisateur. |
+| **Lecteur Web HTML5** | **Persistance de Position & Sonde Heartbeat** | Sauvegarde continue de `currentTime` dans `localStorage`. En cas de panne prolongée, le lecteur préserve la position exacte, sonde la disponibilité du réseau toutes les 2.5 secondes, et **relance automatiquement la lecture à la seconde près dès le retour d'Internet**. |
+| **Lecteur Local MPV** | **Buffer RAM Haute-Capacité** (150 MB / 120s) | Configuré avec `--demuxer-max-bytes=150M` et `--demuxer-readahead-secs=120`, MPV continue la lecture sans interruption même lors d'une coupure Internet de plus d'une minute. |
+
+---
+
 ## 🧪 Tests & Analyse Réseau (XHR Sniffing)
 
 Le dossier `tests/` contient les outils de test et d'analyse :

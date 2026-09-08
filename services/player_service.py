@@ -56,6 +56,14 @@ class PlayerService:
         elif getattr(video, "selected_resolution", None) and video.selected_resolution.get("bandwidth"):
             cmd.append(f"--hls-bitrate={video.selected_resolution['bandwidth']}")
 
+        # Network resilience and high-capacity buffering to survive internet drops
+        cmd.extend([
+            "--demuxer-max-bytes=150M",
+            "--demuxer-max-back-bytes=50M",
+            "--demuxer-readahead-secs=120",
+            "--network-timeout=30",
+        ])
+
         cmd.append(target_url)
 
         if self.logger:

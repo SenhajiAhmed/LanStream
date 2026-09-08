@@ -204,6 +204,21 @@ class TestStreamProxy(unittest.TestCase):
         self.assertIn("audio_1.m3u8", rewritten)
         print("[Test] Master playlist variant filtering verified successfully")
 
+    def test_segment_cache_resilience(self):
+        """Tests that segments are cached in memory so interruptions in connectivity are absorbed."""
+        from services.stream_proxy_service import StreamProxyHandler
+        test_url = "http://upstream.fake/segment_001.ts"
+        fake_data = b"MPEGTS_PAYLOAD_CACHE_TEST"
+        StreamProxyHandler.segment_cache[test_url] = (fake_data, "video/mp2t")
+        StreamProxyHandler.segment_cache_keys.append(test_url)
+
+        proxy_url = f"http://127.0.0.1:{self.proxy.port}/proxy?url={requests.utils.quote(test_url, safe='')}"
+        r = requests.get(proxy_url, timeout=5)
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.content, fake_data)
+        self.assertEqual(r.headers.get("Content-Type"), "video/mp2t")
+        print("[Test] In-memory segment cache resilience verified successfully")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -39,6 +39,9 @@ class StreamProxyHandler(http.server.BaseHTTPRequestHandler):
     upstream_referer: str = "https://1vid.xyz/"
     session: requests.Session = None
     key_cache: dict = {}
+    segment_cache: dict = {}
+    segment_cache_keys: list = []
+    MAX_SEGMENT_CACHE: int = 35
     active_processes: List[subprocess.Popen] = []
     device_logger: DeviceLoggerService = DeviceLoggerService.get_instance()
 
@@ -343,12 +346,108 @@ class StreamProxyHandler(http.server.BaseHTTPRequestHandler):
             }}
         }}
 
+        // Gestion de la persistance de position (résilience aux coupures)
+        var lastValidTime = 0;
+        var storageKey = 'lanstream_resume_' + encodeURIComponent('{title}');
+        try {{
+            var savedPos = localStorage.getItem(storageKey);
+            if (savedPos) lastValidTime = parseFloat(savedPos) || 0;
+        }} catch(e) {{}}
+
+        video.addEventListener('timeupdate', function() {{
+            if (video.currentTime > 2) {{
+                lastValidTime = video.currentTime;
+                try {{ localStorage.setItem(storageKey, lastValidTime); }} catch(e) {{}}
+            }}
+        }});
+
+        // Moteur de reconnexion automatique en cas d'interruption Internet
+        var isReconnecting = false;
+        var reconnectTimer = null;
+
+        function startAutoReconnect() {{
+            if (isReconnecting) return;
+            isReconnecting = true;
+            reportTelemetry("network_disconnect", "Perte de connexion detectee, maintien du flux a " + Math.floor(lastValidTime) + "s", {{ time: lastValidTime }});
+            updateStatus("⚠️ Connexion Internet interrompue. LanStream préserve votre position (" + Math.floor(lastValidTime) + "s) et se reconnecte...", true);
+
+            var attempts = 0;
+            if (reconnectTimer) clearInterval(reconnectTimer);
+            reconnectTimer = setInterval(function() {{
+                attempts++;
+                var probe = new XMLHttpRequest();
+                probe.open('GET', streamUrl + '?probe=' + Date.now(), true);
+                probe.timeout = 3500;
+                probe.onload = function() {{
+                    if (probe.status >= 200 && probe.status < 400) {{
+                        clearInterval(reconnectTimer);
+                        reconnectTimer = null;
+                        isReconnecting = false;
+                        updateStatus("✅ Connexion Internet rétablie ! Reprise automatique du flux...", false);
+                        reportTelemetry("network_reconnected", "Connexion retablie avec succes apres " + attempts + " tentatives", {{ attempts: attempts }});
+                        resumeStreamAt(lastValidTime);
+                    }}
+                }};
+                probe.onerror = probe.ontimeout = function() {{
+                    updateStatus("⚠️ Connexion en attente (tentative " + attempts + ")... LanStream maintient votre position (" + Math.floor(lastValidTime) + "s)", true);
+                }};
+                probe.send();
+            }}, 2500);
+        }}
+
+        function resumeStreamAt(targetTime) {{
+            if (currentHls) {{
+                currentHls.startLoad(targetTime);
+                if (targetTime > 0) video.currentTime = targetTime;
+                var p = video.play();
+                if (p && p.catch) p.catch(function() {{}});
+            }} else {{
+                video.src = streamUrl + '?t=' + Date.now();
+                video.load();
+                var onMeta = function() {{
+                    video.removeEventListener('loadedmetadata', onMeta);
+                    if (targetTime > 0) video.currentTime = targetTime;
+                    var p = video.play();
+                    if (p && p.catch) p.catch(function() {{}});
+                }};
+                video.addEventListener('loadedmetadata', onMeta);
+            }}
+        }}
+
+        window.addEventListener('offline', function() {{
+            startAutoReconnect();
+        }});
+
+        window.addEventListener('online', function() {{
+            startAutoReconnect();
+        }});
+
+        var stallTimeout = null;
+        video.addEventListener('waiting', function() {{
+            clearTimeout(stallTimeout);
+            stallTimeout = setTimeout(function() {{
+                if (video.paused === false && video.readyState < 3) {{
+                    startAutoReconnect();
+                }}
+            }}, 6000);
+        }});
+        video.addEventListener('playing', function() {{
+            clearTimeout(stallTimeout);
+            if (isReconnecting) {{
+                isReconnecting = false;
+                if (reconnectTimer) {{ clearInterval(reconnectTimer); reconnectTimer = null; }}
+            }}
+        }});
+
         video.addEventListener('error', function() {{
             var err = video.error;
             var code = err ? err.code : 0;
             var msg = "Erreur balise video (code " + code + ")";
             if (code === 1) msg = "MEDIA_ERR_ABORTED: Lecture interrompue";
-            else if (code === 2) msg = "MEDIA_ERR_NETWORK: Erreur de telechargement reseau";
+            else if (code === 2) {{
+                msg = "MEDIA_ERR_NETWORK: Erreur de telechargement reseau";
+                startAutoReconnect();
+            }}
             else if (code === 3) msg = "MEDIA_ERR_DECODE: Erreur de decodage materiel TV";
             else if (code === 4) msg = "MEDIA_ERR_SRC_NOT_SUPPORTED: Format non supporte par ce televiseur";
             updateStatus("⚠️ " + msg, true);
@@ -378,27 +477,50 @@ class StreamProxyHandler(http.server.BaseHTTPRequestHandler):
                 updateStatus("Mode actif : <strong>HLS Natif Samsung TV / iOS (Recommandé)</strong>", false);
                 video.src = streamUrl;
                 video.load();
+                if (lastValidTime > 5) {{
+                    var onMeta = function() {{
+                        video.removeEventListener('loadedmetadata', onMeta);
+                        video.currentTime = lastValidTime;
+                    }};
+                    video.addEventListener('loadedmetadata', onMeta);
+                }}
                 var p = video.play();
                 if (p && p.catch) p.catch(function(e) {{ reportTelemetry("play_catch", e.message, {{}}); }});
             }} else if (mode === 'hls_js') {{
                 setActiveButton('btn-hls-js');
                 updateStatus("Mode actif : <strong>Hls.js Adaptatif (Chrome / Android / PC)</strong>", false);
                 if (typeof Hls !== 'undefined' && Hls.isSupported()) {{
-                    currentHls = new Hls({{ maxBufferLength: 30, enableWorker: true }});
+                    currentHls = new Hls({{
+                        maxBufferLength: 60,
+                        maxMaxBufferLength: 120,
+                        enableWorker: true,
+                        manifestLoadingMaxRetry: 20,
+                        manifestLoadingRetryDelay: 1500,
+                        manifestLoadingMaxRetryTimeout: 90000,
+                        fragLoadingMaxRetry: 20,
+                        fragLoadingRetryDelay: 1500,
+                        fragLoadingMaxRetryTimeout: 90000,
+                        levelLoadingMaxRetry: 20,
+                        levelLoadingRetryDelay: 1500,
+                        levelLoadingMaxRetryTimeout: 90000
+                    }});
                     currentHls.loadSource(streamUrl);
                     currentHls.attachMedia(video);
                     currentHls.on(Hls.Events.MANIFEST_PARSED, function() {{
+                        if (lastValidTime > 5) {{
+                            video.currentTime = lastValidTime;
+                        }}
                         video.play();
                     }});
                     currentHls.on(Hls.Events.ERROR, function(event, data) {{
                         reportTelemetry("hls_error", data.type + " : " + (data.details || ""), data);
                         if (data && data.fatal) {{
-                            if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {{
+                            if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {{
+                                startAutoReconnect();
+                            }} else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {{
                                 currentHls.recoverMediaError();
-                            }} else if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {{
-                                currentHls.startLoad();
                             }} else {{
-                                updateStatus("⚠️ Erreur Hls.js. Bascule sur HLS Natif...", true);
+                                updateStatus("⚠️ Erreur Hls.js non récupérable. Bascule sur HLS Natif...", true);
                                 switchMode('native_hls');
                             }}
                         }}
@@ -412,12 +534,26 @@ class StreamProxyHandler(http.server.BaseHTTPRequestHandler):
                 updateStatus("Mode actif : <strong>MPEG-TS Direct (Flux broadcast universel)</strong>", false);
                 video.src = tsUrl;
                 video.load();
+                if (lastValidTime > 5) {{
+                    var onMeta = function() {{
+                        video.removeEventListener('loadedmetadata', onMeta);
+                        video.currentTime = lastValidTime;
+                    }};
+                    video.addEventListener('loadedmetadata', onMeta);
+                }}
                 video.play();
             }} else if (mode === 'mp4') {{
                 setActiveButton('btn-mp4');
                 updateStatus("Mode actif : <strong>Direct MP4</strong>", false);
                 video.src = mp4Url;
                 video.load();
+                if (lastValidTime > 5) {{
+                    var onMeta = function() {{
+                        video.removeEventListener('loadedmetadata', onMeta);
+                        video.currentTime = lastValidTime;
+                    }};
+                    video.addEventListener('loadedmetadata', onMeta);
+                }}
                 video.play();
             }}
         }}
@@ -481,6 +617,9 @@ class StreamProxyHandler(http.server.BaseHTTPRequestHandler):
         cmd = [
             "ffmpeg",
             "-loglevel", "error",
+            "-reconnect", "1",
+            "-reconnect_on_network_error", "1",
+            "-reconnect_delay_max", "5",
             "-extension_picky", "0",
             "-headers", headers_str,
             "-i", self.video.stream_url,
@@ -619,8 +758,10 @@ class StreamProxyHandler(http.server.BaseHTTPRequestHandler):
         self.device_logger.on_response(client_ip, self.path, 200, len(encoded))
 
     def _proxy_upstream(self, upstream_url: str, client_ip: str = "127.0.0.1"):
-        """Streams upstream segments, encryption keys, or sub-manifests to the client."""
-        # Fast path: in-memory cache for AES-128 encryption keys
+        """Streams upstream segments, encryption keys, or sub-manifests to the client.
+        Includes in-memory LRU caching and resilient exponential backoff retry to survive network drops.
+        """
+        # Fast path 1: in-memory cache for AES-128 encryption keys
         is_key = "encryption.key" in upstream_url or ".key" in upstream_url
         if is_key and upstream_url in self.key_cache:
             cached_key = self.key_cache[upstream_url]
@@ -637,6 +778,22 @@ class StreamProxyHandler(http.server.BaseHTTPRequestHandler):
                 pass
             return
 
+        # Fast path 2: in-memory LRU cache for recent video/audio segments (instant fallback during network drops)
+        if not is_key and upstream_url in self.segment_cache:
+            cached_data, cached_ct = self.segment_cache[upstream_url]
+            self.send_response(200)
+            self.send_header("Content-Type", cached_ct)
+            self.send_header("Content-Length", str(len(cached_data)))
+            self.send_header("Cache-Control", "public, max-age=3600")
+            self._send_cors_headers()
+            self.end_headers()
+            try:
+                self.wfile.write(cached_data)
+                self.device_logger.on_response(client_ip, self.path, 200, len(cached_data))
+            except (BrokenPipeError, ConnectionResetError, socket.error):
+                pass
+            return
+
         headers = {
             "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36",
             "Referer": self.upstream_referer,
@@ -645,18 +802,19 @@ class StreamProxyHandler(http.server.BaseHTTPRequestHandler):
         if "Range" in self.headers:
             headers["Range"] = self.headers["Range"]
 
-        # Fetch from upstream with automatic retry to shield TV from upstream CDN drops
+        # Fetch from upstream with automatic retry & exponential backoff (~15-20s resilience window)
         upstream_resp = None
         last_exc = None
         import time
-        for attempt in range(3):
+        for attempt in range(6):
             try:
-                upstream_resp = self.session.get(upstream_url, headers=headers, timeout=(5, 25))
-                if upstream_resp.status_code == 200 or upstream_resp.status_code < 500:
+                upstream_resp = self.session.get(upstream_url, headers=headers, timeout=(4, 20))
+                if upstream_resp.status_code == 200 or (upstream_resp.status_code < 500 and upstream_resp.status_code != 404):
                     break
             except Exception as e:
                 last_exc = e
-                time.sleep(0.15 * (attempt + 1))
+                backoff = min(0.3 * (1.8 ** attempt), 3.5)
+                time.sleep(backoff)
 
         if upstream_resp is None:
             self.send_error(502, f"Upstream proxy request error: {last_exc}")
@@ -706,6 +864,14 @@ class StreamProxyHandler(http.server.BaseHTTPRequestHandler):
                 mime_type = "video/mp4"
             else:
                 mime_type = upstream_ct
+
+        # Populate LRU segment cache
+        if not is_key and upstream_resp.status_code == 200 and len(content) > 0:
+            if len(self.segment_cache_keys) >= self.MAX_SEGMENT_CACHE:
+                oldest_key = self.segment_cache_keys.pop(0)
+                self.segment_cache.pop(oldest_key, None)
+            self.segment_cache[upstream_url] = (content, mime_type)
+            self.segment_cache_keys.append(upstream_url)
 
         self.send_response(upstream_resp.status_code)
         self.send_header("Content-Type", mime_type)
