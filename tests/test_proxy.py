@@ -3,6 +3,8 @@ Unit test for Local HLS Stream Proxy
 """
 import http.server
 import os
+os.environ["no_proxy"] = "*"
+os.environ["NO_PROXY"] = "*"
 import subprocess
 import time
 import unittest

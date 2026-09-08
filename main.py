@@ -22,12 +22,13 @@ from models.video import Video
 class EgyStreamApp:
     """Core CLI Application controller managing multi-provider search, selection, and auto-playback."""
 
-    def __init__(self, debug: bool = False, share_mode: bool = False):
+    def __init__(self, debug: bool = False, share_mode: bool = False, mpv_mode: bool = False):
         self.logger = setup_logger(level="DEBUG" if debug else "INFO")
         self.search_service = SearchService(logger=self.logger)
         self.extractor_service = ExtractorService(logger=self.logger)
         self.player_service = PlayerService(logger=self.logger)
         self.share_mode = share_mode
+        self.mpv_mode = mpv_mode
         self.active_proxy: Optional[StreamProxyService] = None
 
     def run(self, initial_query: Optional[str] = None):
@@ -71,19 +72,41 @@ class EgyStreamApp:
                     print(f"❌ Failed to extract stream URL for {selected_video.title}.")
                     continue
 
+                # Choose playback / sharing mode
                 if self.share_mode:
-                    # Wi-Fi sharing mode
+                    action = "2"
+                elif self.mpv_mode:
+                    action = "1"
+                else:
+                    action = TerminalUI.prompt_playback_action(selected_video.title)
+
+                if action == "4":  # Back
+                    continue
+
+                if action in ["2", "3"]:
+                    # Start Local Wi-Fi Stream Proxy (shows the TV sharing banner)
                     self._start_proxy(selected_video)
+
+                if action in ["1", "3"]:
+                    # Play locally with MPV
+                    self.player_service.play(selected_video)
+
+                if action == "2":
+                    # Keep proxy running while user streams on Smart TV
                     try:
                         input("\n📡 Proxy is running! Press [Enter] anytime to stop sharing on Wi-Fi: ")
                     except (KeyboardInterrupt, EOFError):
                         pass
                     self._cleanup_proxy()
-                else:
-                    # Auto-stream directly with MPV!
-                    print(f"🚀 Auto-streaming '{selected_video.title}' with MPV...\n")
-                    self.player_service.play(selected_video)
-                    print("\nPlayback ended.")
+                elif action == "3":
+                    # Ask if user wants to keep proxy running after MPV closes
+                    try:
+                        keep = input("\n📡 MPV closed. Keep sharing stream on Wi-Fi? (y/N): ").strip().lower()
+                        if keep in ["y", "yes"]:
+                            input("Press [Enter] anytime to stop sharing on Wi-Fi: ")
+                    except (KeyboardInterrupt, EOFError):
+                        pass
+                    self._cleanup_proxy()
 
                 # Reset to allow another search or another pick
                 print("\n" + "─" * 65)
@@ -121,7 +144,7 @@ class EgyStreamApp:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="EGY-Stream: Unified CLI video search and automatic MPV streaming.")
+    parser = argparse.ArgumentParser(description="EGY-Stream: Unified CLI video search and playback.")
     parser.add_argument(
         "search_query",
         nargs="?",
@@ -137,7 +160,12 @@ def main():
     parser.add_argument(
         "--share",
         action="store_true",
-        help="Share stream over local Wi-Fi (Smart TV / mobile) instead of local MPV"
+        help="Directly start Wi-Fi stream proxy for Smart TV (skips menu)"
+    )
+    parser.add_argument(
+        "--mpv",
+        action="store_true",
+        help="Directly launch MPV locally (skips menu)"
     )
     parser.add_argument(
         "--debug",
@@ -147,7 +175,7 @@ def main():
     args = parser.parse_args()
 
     initial_query = args.search_query or args.query
-    app = EgyStreamApp(debug=args.debug, share_mode=args.share)
+    app = EgyStreamApp(debug=args.debug, share_mode=args.share, mpv_mode=args.mpv)
     app.run(initial_query=initial_query)
 
 

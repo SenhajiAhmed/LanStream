@@ -2,6 +2,8 @@
 Unit tests for DeviceLoggerService and client diagnostic telemetry
 """
 import os
+os.environ["no_proxy"] = "*"
+os.environ["NO_PROXY"] = "*"
 import unittest
 import requests
 
