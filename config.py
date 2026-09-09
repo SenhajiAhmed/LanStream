@@ -8,6 +8,8 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 # Provider Configuration
 BASE_URL = "https://yam.ahwaktv.net"
 SEARCH_URL = f"{BASE_URL}/search.php"
+WITANIME_BASE_URL = "https://witanime.you"
+WITANIME_SEARCH_URL = f"{WITANIME_BASE_URL}/?search_param=animes"
 
 # HTTP Headers
 DEFAULT_HEADERS = {

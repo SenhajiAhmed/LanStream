@@ -1026,6 +1026,8 @@ class StreamProxyService:
             ref_url = self.video.embed_url or self.video.page_url
             parsed = urllib.parse.urlparse(ref_url)
             handler_class.upstream_referer = f"{parsed.scheme}://{parsed.netloc}/"
+        if self.video and ("ok.ru" in (self.video.stream_url or "") or "odnoklassniki" in (self.video.stream_url or "")):
+            handler_class.upstream_referer = "https://ok.ru/"
 
         # Configure resilient session with HTTPAdapter and connection pooling
         session = requests.Session()

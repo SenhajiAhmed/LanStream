@@ -22,6 +22,8 @@ class Video:
     selected_resolution: Optional[Dict[str, Any]] = None
     selected_vid: Optional[int] = None
     available_resolutions: Optional[List[Dict[str, Any]]] = None
+    episodes: Optional[List[Dict[str, Any]]] = None
+    selected_episode: Optional[Dict[str, Any]] = None
 
     def __str__(self) -> str:
         tag = f"[{self.provider}] " if self.provider else ""

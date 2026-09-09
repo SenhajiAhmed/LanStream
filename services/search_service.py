@@ -10,8 +10,12 @@ import urllib.parse
 import re
 from typing import List
 import requests
+from bs4 import BeautifulSoup
 
-from config import SEARCH_URL, DEFAULT_HEADERS, DEFAULT_TIMEOUT, SEARCH_RESULTS_FILE
+from config import (
+    SEARCH_URL, DEFAULT_HEADERS, DEFAULT_TIMEOUT, SEARCH_RESULTS_FILE,
+    WITANIME_BASE_URL, WITANIME_SEARCH_URL
+)
 from models.video import Video
 
 TMDB_API_KEY = "8476a7ab80ad76f0936744df0430e67c"
@@ -42,13 +46,17 @@ class SearchService:
         # 2. Search EGY-Stream / Ahwak
         egystream_videos = self._search_egystream(cleaned_query)
 
+        # 3. Search WitAnime (pure requests)
+        witanime_videos = self._search_witanime(cleaned_query)
+
         # Combine results
-        combined_videos = cinejoy_videos + egystream_videos
+        combined_videos = cinejoy_videos + egystream_videos + witanime_videos
 
         if self.logger:
             self.logger.info(
                 f"Search results: {len(cinejoy_videos)} [cineby], "
-                f"{len(egystream_videos)} [egy-stream] (Total: {len(combined_videos)})"
+                f"{len(egystream_videos)} [egy-stream], "
+                f"{len(witanime_videos)} [witanime] (Total: {len(combined_videos)})"
             )
 
         # Save results to output file
@@ -141,6 +149,81 @@ class SearchService:
                     provider="egy-stream"
                 )
             )
+
+        return videos
+
+    def _search_witanime(self, query: str, limit: int = 8) -> List[Video]:
+        """Searches anime on WitAnime (witanime.you) via pure requests."""
+        videos = []
+        headers = dict(DEFAULT_HEADERS)
+        headers["Referer"] = f"{WITANIME_BASE_URL}/"
+
+        try:
+            # 1. Search for anime series
+            params = {"search_param": "animes", "s": query}
+            resp = self.session.get(f"{WITANIME_BASE_URL}/", params=params, headers=headers, timeout=DEFAULT_TIMEOUT)
+            if resp.status_code == 200:
+                soup = BeautifulSoup(resp.text, "html.parser")
+                seen_urls = set()
+
+                for a in soup.find_all("a", href=re.compile(r"/anime/[^/]+/?$")):
+                    url = a.get("href", "").strip()
+                    title = a.get_text(strip=True)
+                    if not url or url in seen_urls or not title or len(title) < 2:
+                        continue
+                    if any(skip in title.lower() for skip in ["قائمة الانمي", "anime-type", "anime-genre"]):
+                        continue
+
+                    seen_urls.add(url)
+                    slug = url.rstrip("/").split("/")[-1]
+
+                    parent_card = a.find_parent(class_=re.compile(r"anime-card|col-md-3|item"))
+                    thumb = None
+                    if parent_card:
+                        img = parent_card.find("img")
+                        if img:
+                            thumb = img.get("src") or img.get("data-src")
+
+                    videos.append(
+                        Video(
+                            id=slug,
+                            title=title,
+                            page_url=url,
+                            thumbnail_url=thumb,
+                            provider="witanime"
+                        )
+                    )
+                    if len(videos) >= limit:
+                        break
+
+            # 2. If no series found, fallback to searching individual episodes
+            if not videos:
+                params_ep = {"search_param": "episodes", "s": query}
+                resp_ep = self.session.get(f"{WITANIME_BASE_URL}/", params=params_ep, headers=headers, timeout=DEFAULT_TIMEOUT)
+                if resp_ep.status_code == 200:
+                    soup_ep = BeautifulSoup(resp_ep.text, "html.parser")
+                    seen_urls = set()
+                    for a in soup_ep.find_all("a", href=re.compile(r"/episode/[^/]+/?$")):
+                        url = a.get("href", "").strip()
+                        title = a.get_text(strip=True)
+                        if not url or url in seen_urls or not title or "اقرأ المزيد" in title:
+                            continue
+                        seen_urls.add(url)
+                        slug = url.rstrip("/").split("/")[-1]
+
+                        videos.append(
+                            Video(
+                                id=slug,
+                                title=title,
+                                page_url=url,
+                                provider="witanime"
+                            )
+                        )
+                        if len(videos) >= limit:
+                            break
+        except Exception as e:
+            if self.logger:
+                self.logger.error(f"WitAnime search error: {e}")
 
         return videos
 

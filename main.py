@@ -65,6 +65,24 @@ class EgyStreamApp:
                     break
 
                 selected_video = videos[choice]
+
+                # For anime series (e.g. WitAnime), load and prompt for episode selection
+                if getattr(selected_video, "provider", None) == "witanime" and "/anime/" in (selected_video.page_url or ""):
+                    print(f"\n⏳ Loading episodes for: {selected_video.title}...")
+                    episodes = self.extractor_service.get_anime_episodes(selected_video.page_url)
+                    if episodes:
+                        selected_video.episodes = episodes
+                        if len(episodes) > 1:
+                            chosen_ep = TerminalUI.prompt_episode(episodes)
+                        else:
+                            chosen_ep = episodes[0]
+                        if chosen_ep:
+                            selected_video.selected_episode = chosen_ep
+                            selected_video.title = f"{selected_video.title} - {chosen_ep.get('type', 'الحلقة')} {chosen_ep.get('number', '')}"
+                            selected_video.page_url = chosen_ep.get("url", selected_video.page_url)
+                    else:
+                        print("⚠️ Could not retrieve episode catalog. Attempting direct resolution...")
+
                 print(f"\n⏳ Resolving stream for: {selected_video.title}...")
 
                 stream_url = self.extractor_service.extract_stream(selected_video)

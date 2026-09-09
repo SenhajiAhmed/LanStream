@@ -57,6 +57,9 @@ class TerminalUI:
                     extra.append(f"⭐ {video.rating}/10")
                 extra_str = f" ({', '.join(extra)})" if extra else ""
                 print(f"  {cls.BOLD}{cls.CYAN}{idx:2d}.{cls.RESET} {tag} {video.title}{extra_str} {cls.DIM}[ID: {video.id}]{cls.RESET}")
+            elif provider == "witanime":
+                tag = f"{cls.BOLD}{cls.BLUE}[witanime]{cls.RESET}"
+                print(f"  {cls.BOLD}{cls.CYAN}{idx:2d}.{cls.RESET} {tag} {video.title} {cls.DIM}[ID: {video.id}]{cls.RESET}")
             else:
                 tag = f"{cls.BOLD}{cls.GREEN}[egy-stream]{cls.RESET}"
                 print(f"  {cls.BOLD}{cls.CYAN}{idx:2d}.{cls.RESET} {tag} {video.title} {cls.DIM}[ID: {video.id}]{cls.RESET}")
@@ -131,4 +134,36 @@ class TerminalUI:
                 print(f"{cls.RED}⚠ Invalid input. Please enter a valid number.{cls.RESET}")
             except (KeyboardInterrupt, EOFError):
                 return None
+
+    @classmethod
+    def prompt_episode(cls, episodes: list) -> Optional[dict]:
+        """Displays available episodes and lets the user select one."""
+        if not episodes:
+            return None
+
+        print(f"\n{cls.BOLD}{cls.GREEN}📑 Available Episodes ({len(episodes)} total):{cls.RESET}")
+        print("─" * 65)
+        display_limit = 25
+        for idx, ep in enumerate(episodes[:display_limit], start=1):
+            ep_type = ep.get("type", "الحلقة")
+            ep_num = ep.get("number", idx)
+            print(f"  {cls.BOLD}{cls.CYAN}{idx:2d}.{cls.RESET} {ep_type} {ep_num}")
+        if len(episodes) > display_limit:
+            print(f"  {cls.DIM}... and {len(episodes) - display_limit} more episodes (enter any number up to {len(episodes)}){cls.RESET}")
+        print("─" * 65)
+
+        max_val = len(episodes)
+        while True:
+            try:
+                raw = input(f"\n{cls.BOLD}{cls.YELLOW}👉 Select episode [1-{max_val}] (Press Enter for Ep 1): {cls.RESET}").strip()
+                if not raw:
+                    return episodes[0]
+                choice = int(raw)
+                if 1 <= choice <= max_val:
+                    return episodes[choice - 1]
+                print(f"{cls.RED}⚠ Please enter a number between 1 and {max_val}.{cls.RESET}")
+            except ValueError:
+                print(f"{cls.RED}⚠ Invalid input. Please enter a valid number.{cls.RESET}")
+            except (KeyboardInterrupt, EOFError):
+                return episodes[0]
 

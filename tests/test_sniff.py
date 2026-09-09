@@ -19,6 +19,7 @@ import json
 import re
 import argparse
 from urllib.parse import urlparse
+from selenium.webdriver.common.by import By
 
 # Patch OpenSSL / mitmproxy for Selenium-Wire compatibility on Python 3.12+ / 3.13
 def patch_seleniumwire_ssl():
@@ -106,7 +107,15 @@ def run_with_undetected_chrome(url: str, output_dir: str, duration: int = 30, ve
 
     # Find Chrome browser binary
     browser_executable = None
-    for cand in ["/usr/bin/google-chrome-stable", "/usr/bin/google-chrome", "/usr/bin/chromium", "/usr/bin/chromium-browser"]:
+    for cand in [
+        "/usr/bin/google-chrome-stable",
+        "/usr/bin/google-chrome",
+        "/opt/google/chrome/google-chrome",
+        "/usr/bin/chromium",
+        "/usr/bin/chromium-browser",
+        "/usr/bin/brave-browser",
+        "/opt/brave.com/brave/brave-browser",
+    ]:
         if os.path.exists(cand) and os.access(cand, os.X_OK):
             browser_executable = cand
             break
@@ -147,6 +156,7 @@ def run_with_undetected_chrome(url: str, output_dir: str, duration: int = 30, ve
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--lang=en-US,en,ar")
+    options.add_argument("--window-size=1280,850")
     if headless:
         options.add_argument("--headless=new")
 
@@ -185,7 +195,19 @@ def run_with_undetected_chrome(url: str, output_dir: str, duration: int = 30, ve
 
         while time.time() - start_time < duration:
             time.sleep(2)
-            # Try to trigger playback on video elements or play buttons
+
+            # Close unexpected popup tabs / ads
+            try:
+                if len(driver.window_handles) > 1:
+                    orig_h = driver.window_handles[0]
+                    for h in driver.window_handles[1:]:
+                        driver.switch_to.window(h)
+                        driver.close()
+                    driver.switch_to.window(orig_h)
+            except Exception:
+                pass
+
+            # 1. Try to trigger playback on main document
             try:
                 driver.execute_script("""
                     const selectors = [
@@ -195,6 +217,7 @@ def run_with_undetected_chrome(url: str, output_dir: str, duration: int = 30, ve
                         '.play-button',
                         'button.play',
                         'div[class*="play"]',
+                        'div[class*="player"]',
                         'video'
                     ];
                     for (let sel of selectors) {
@@ -202,6 +225,54 @@ def run_with_undetected_chrome(url: str, output_dir: str, duration: int = 30, ve
                         if (el) { el.click(); break; }
                     }
                 """)
+            except Exception:
+                pass
+
+            # 2. Try to trigger playback inside iframes (e.g. Cat-Player / Vidstream)
+            try:
+                frames = driver.find_elements(By.TAG_NAME, "iframe")
+                for f_idx, frame in enumerate(frames):
+                    try:
+                        driver.switch_to.frame(frame)
+                        # Check candidates inside iframe DOM and save HTML
+                        try:
+                            f_html = driver.page_source
+                            iframe_save_path = os.path.join(output_dir, f"captured_iframe_{f_idx}.html")
+                            with open(iframe_save_path, "w", encoding="utf-8") as f_out:
+                                f_out.write(f_html)
+                            f_cands = extract_media_candidates_from_html(f_html)
+                            for c in f_cands:
+                                captured_streams.append({"source": f"Iframe [{f_idx}] ({c['type']})", "url": c["url"]})
+                        except Exception:
+                            pass
+
+                        # Click play inside iframe
+                        driver.execute_script("""
+                            const selectors = [
+                                '.play-button',
+                                'button',
+                                '#player',
+                                'video',
+                                '.vjs-big-play-button',
+                                '.jw-display-icon-container',
+                                'div[class*="play"]',
+                                'div[class*="player"]',
+                                '[aria-label*="play" i]',
+                                '[aria-label*="Play" i]',
+                                'svg'
+                            ];
+                            for (let sel of selectors) {
+                                let el = document.querySelector(sel);
+                                if (el) { el.click(); break; }
+                            }
+                            const vids = document.querySelectorAll('video');
+                            vids.forEach(v => {
+                                try { v.muted = true; v.play(); } catch(e){}
+                            });
+                        """)
+                        driver.switch_to.default_content()
+                    except Exception:
+                        driver.switch_to.default_content()
             except Exception:
                 pass
 
@@ -251,6 +322,7 @@ def run_with_undetected_chrome(url: str, output_dir: str, duration: int = 30, ve
                         status = resp.get("status")
                         mime = resp.get("mimeType", "")
                         resp_url = resp.get("url", "")
+                        res_type = params.get("type", "")
 
                         # Update status in captured_requests
                         for item in captured_requests:
@@ -265,12 +337,25 @@ def run_with_undetected_chrome(url: str, output_dir: str, duration: int = 30, ve
                                 print(f"    ⭐ [STREAM DETECTED] Status {status} | MIME: {mime} | URL: {resp_url}", flush=True)
                             captured_streams.append({"source": f"CDP Response ({mime})", "url": resp_url})
 
+                        # Inspect XHR/JSON response bodies for embedded stream links
+                        if "json" in mime or res_type in ["XHR", "Fetch"] or any(k in resp_url.lower() for k in ["source", "cat-player", "api", "stream"]):
+                            try:
+                                body_res = driver.execute_cdp_cmd("Network.getResponseBody", {"requestId": req_id})
+                                body_text = body_res.get("body", "")
+                                p = re.compile(r'https?://[^\s"\'<>]+\.(?:m3u8|mp4|webm|mpd)(?:\?[^\s"\'<>]*)?', re.IGNORECASE)
+                                for match in p.findall(body_text):
+                                    if not quiet:
+                                        print(f"    ⭐ [STREAM IN BODY] {match}", flush=True)
+                                    captured_streams.append({"source": "CDP Body", "url": match})
+                            except Exception:
+                                pass
+
                 except Exception:
                     pass
 
-            if early_exit and any(".m3u8" in s["url"] for s in captured_streams):
+            if early_exit and any(s.get("source", "").startswith("CDP") and (".m3u8" in s["url"] or ".mp4" in s["url"]) for s in captured_streams):
                 if not quiet:
-                    print("\n[⚡] Stream playlist detected! Exiting early...", flush=True)
+                    print("\n[⚡] Stream playlist detected via network! Exiting early...", flush=True)
                 break
 
         if not quiet:

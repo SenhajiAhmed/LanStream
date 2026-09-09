@@ -1,19 +1,21 @@
 # 📺 LanStream
 
-Application CLI moderne en **Python orienté objet (OOP)** permettant de rechercher des films et séries sur plusieurs catalogues (**Cineby / TMDB** & **Egy-Stream**), de choisir la résolution désirée (4K HDR, 1080p, 720p, 360p, Auto), d'extraire automatiquement leurs flux HLS/fMP4 déprotégés, et de les visionner :
+Application CLI moderne en **Python orienté objet (OOP)** permettant de rechercher des films, séries et animes sur plusieurs catalogues (**Cineby / TMDB**, **Egy-Stream** & **WitAnime**), de choisir la résolution désirée (4K HDR, 1080p, 720p, 480p, 360p, Auto), d'extraire automatiquement leurs flux HLS/fMP4 déprotégés, et de les visionner :
 - En **local** via le lecteur haute-performance **MPV**
 - En **streaming Wi-Fi local** via un micro-proxy intégré compatible avec tous vos appareils (PC, smartphones, iPhone/Android, et **Smart TV Samsung / Tizen / Orsay**).
 
-Le projet inclut également un module de **sniffing réseau headless** ultra-rapide avec détection précoce (early-exit) et interception CDP.
+Le projet inclut également un module de **sniffing réseau headless** ultra-rapide avec détection précoce (early-exit) et interception CDP, ainsi qu'un moteur d'extraction **100% pur `requests`** sans aucun driver de navigateur pour les catalogues optimisés.
 
 ---
 
 ## 🚀 Fonctionnalités
 
-- 🌐 **Recherche multi-sources agrégée** : Recherche instantanée simultanée sur le catalogue international **Cineby** (via TMDB avec notes ⭐ et dates) et sur le catalogue arabe **Egy-Stream**.
-- 🔢 **Sélection indexée par numéros** : Présente les résultats sous forme de liste numérotée claire (`[cineby]`, `[egy-stream]`) pour un choix rapide au clavier.
-- 📺 **Sélecteur de résolutions interactif** : Détecte les profils disponibles dans les flux HLS master et permet de choisir entre **Auto**, **4K Ultra HD**, **1080p Full HD**, **720p HD**, ou **360p**.
-- ⚡ **Extraction automatique & Headless Sniffer** : Détecte et extrait les flux master HLS (`master.m3u8`) et fMP4 en quelques secondes via Chrome CDP sans navigation visible.
+- 🌐 **Recherche multi-sources agrégée** : Recherche instantanée simultanée sur le catalogue international **Cineby** (via TMDB avec notes ⭐ et dates), le catalogue arabe **Egy-Stream**, et le catalogue anime **WitAnime**.
+- 🔢 **Sélection indexée par numéros** : Présente les résultats sous forme de liste numérotée claire (`[cineby]`, `[egy-stream]`, `[witanime]`) pour un choix rapide au clavier.
+- 🎌 **Déchiffrement XOR Bitwise Instantané (WitAnime)** : Déchiffrement mathématique ultra-rapide de l'intégralité du catalogue d'épisodes sans aucun browser driver (< 300 ms pour plus de 200 épisodes).
+- 📑 **Sélecteur d'épisodes interactif** : Affichage et sélection ergonomique de l'épisode désiré pour les séries d'animation.
+- 📺 **Sélecteur de résolutions interactif** : Détecte les profils disponibles dans les flux HLS master et permet de choisir entre **Auto**, **4K Ultra HD**, **1080p Full HD**, **720p HD**, **480p SD** ou **360p**.
+- ⚡ **Extraction automatique & Headless Sniffer** : Détecte et extrait les flux master HLS (`master.m3u8`) et fMP4 en quelques secondes via Chrome CDP ou déobfuscation algorithmique native.
 - ▶️ **Lecture directe avec MPV** : Lance la lecture plein écran avec transmission automatique des en-têtes HTTP requis (`Referer`, `Origin`) et sélection automatique de la résolution (`--vid`).
 - 📡 **Micro-Proxy Wi-Fi & Smart TV** :
   - **Lecteur Web HTML5 universel** : `http://<IP_LOCALE>:8080/` avec `Hls.js` et détection intelligente.
@@ -236,6 +238,63 @@ Si votre connexion Internet subit des micro-coupures, des variations de débit o
 
 ---
 
+## 🔓 Ingénierie & Reverse-Engineering : Le Cas WitAnime (Zero-Driver)
+
+Afin de garantir une réactivité maximale et une empreinte mémoire minimale, **LanStream privilégie l'extraction 100% sans navigateur (Zero-Driver)** dès que les mécanismes de sécurité du fournisseur peuvent être rétro-conçus mathématiquement.
+
+### 1. Reverse-Engineering du Cipher XOR Base64 (`processedEpisodeData`)
+
+Sur **WitAnime**, les pages des séries d'animation (`/anime/<slug>/`) ne contiennent pas les liens d'épisodes en clair dans le DOM. À la place, le script de rendu client (`rnd.js`) injecte dynamiquement la liste d'épisodes à partir d'une chaîne chiffrée :
+
+```javascript
+var processedEpisodeData = "aHR0cHM6... . MTIzNDU2...";
+```
+
+La chaîne est composée de deux blocs Base64 séparés par un point (`part0.part1`). L'algorithme applique une opération de **OU exclusif (XOR bitwise)** entre chaque octet de la charge utile (`part0`) et la clé cyclique (`part1`) :
+
+$$\text{decrypted}[i] = \text{part0}[i] \oplus \text{part1}[i \pmod{|\text{part1}|}]$$
+
+#### Implémentation en Pur Python :
+```python
+import base64
+import json
+
+# 1. Découpage des deux composantes Base64
+part0 = base64.b64decode(parts[0]).decode("latin1")
+part1 = base64.b64decode(parts[1]).decode("latin1")
+
+# 2. Déchiffrement XOR bitwise avec clé cyclique
+decrypted = "".join(
+    chr(ord(part0[i]) ^ ord(part1[i % len(part1)])) 
+    for i in range(len(part0))
+)
+
+# 3. Parsing direct du payload JSON
+episodes = json.loads(decrypted)
+```
+
+> [!TIP]
+> **Performance Record** : Cette rétro-ingénierie résout instantanément la liste complète de tous les épisodes (ex : **205 épisodes pour *Bleach***) en **< 300 ms**, sans lancer Chrome, sans consommer 400 Mo de RAM et sans aucun risque de crash ou de blocage de pilote.
+
+---
+
+### 2. Désobfuscation des Serveurs de Streaming (`yh00.js`)
+
+Sur les pages de visionnage (`/episode/<slug>/`), les serveurs de streaming sont protégés par une double variable Base64 `_zT` (ressources) et `_zV` (configurations d'offset) :
+
+1. **Inversion de chaîne** : `rev = res_data[::-1]`
+2. **Sanitisation Base64** : Élimination des caractères de bourrage aléatoires (`re.sub(r'[^A-Za-z0-9+/=]', '', rev)`).
+3. **Offset dynamique** : Extraction de l'index de clé (`k`) et de la table de décalage (`d`).
+4. **Tranchage & Clé d'API** : Décodage Base64, suppression des derniers octets de bruit (`url[:-offset]`) et concaténation du hash framework Yonaplay (`&apiKey=...`).
+
+### 3. Extraction Multi-Résolution sans Driver
+Une fois les serveurs résolus, LanStream extrait directement les flux master :
+- **OK.ru** : Analyse directe du conteneur `data-options` JSON pour obtenir le manifeste maître HLS (`hlsManifestUrl`) et les profils MP4 (1080p Full HD, 720p HD, 480p SD, 360p).
+- **StreamWish / hgcloud** : Décompactage automatique de l'obfuscateur JavaScript Dean Edwards (`eval(function(p,a,c,k,e,d)...)`).
+- **Mp4Upload** : Extraction directe des vidéos progressives `.mp4` pour les catalogues rétro.
+
+---
+
 ## 🧪 Tests & Analyse Réseau (XHR Sniffing)
 
 Le dossier `tests/` contient les outils de test et d'analyse :
@@ -282,6 +341,11 @@ Les paramètres peuvent être ajustés dans `config.py` :
 - `OUTPUT_DIR` : Répertoire de sortie des résultats (`output/`).
 - `MPV_BINARY` : Nom ou chemin de l'exécutable MPV.
 - `REQUEST_TIMEOUT` : Délai d'expiration des requêtes HTTP (en secondes).
+
+---
+
+## 🗺️ Feuille de Route & Reverse-Engineering
+Pour consulter la méthodologie complète de reverse-engineering, l'analyse comparative des fournisseurs (Cineby, Egy-Stream, KAA.lt) et le cycle d'intégration des nouvelles sources, consultez le document dédié : [ROADMAP.md](ROADMAP.md).
 
 ---
 

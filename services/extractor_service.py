@@ -4,6 +4,9 @@ Stream Extractor Service
 import os
 import re
 import urllib.parse
+import base64
+import json
+import html
 from typing import Optional, List, Dict, Any
 import requests
 
@@ -31,6 +34,10 @@ class ExtractorService:
         # Provider: Cineby / Cinejoy uses headless Chrome sniffer with early-exit
         if getattr(video, "provider", None) in ["cineby", "cinejoy"] or "cinejoy.to" in (video.page_url or ""):
             return self._extract_cinejoy_stream(video)
+
+        # Provider: WitAnime (pure requests)
+        if getattr(video, "provider", None) == "witanime" or "witanime.you" in (video.page_url or ""):
+            return self._extract_witanime_stream(video)
 
         # Step 1: Fetch the watch page
         try:
@@ -210,6 +217,8 @@ class ExtractorService:
             headers["Referer"] = referer
             if "cinejoy" in referer or "cineby" in referer:
                 headers["Origin"] = referer.rstrip("/")
+        if "ok.ru" in master_url or "odnoklassniki" in master_url:
+            headers["Referer"] = "https://ok.ru/"
 
         try:
             resp = self.session.get(master_url, headers=headers, timeout=10)
@@ -267,3 +276,255 @@ class ExtractorService:
             })
 
         return resolutions
+
+    def get_anime_episodes(self, anime_url: str) -> List[Dict[str, Any]]:
+        """Decrypts the list of episodes for a WitAnime series page via pure requests."""
+        headers = dict(DEFAULT_HEADERS)
+        headers["Referer"] = "https://witanime.you/"
+        try:
+            resp = self.session.get(anime_url, headers=headers, timeout=DEFAULT_TIMEOUT)
+            if resp.status_code != 200:
+                return []
+
+            m = re.search(r'var\s+processedEpisodeData\s*=\s*["\']([^"\']+)["\']', resp.text)
+            if not m:
+                return []
+
+            parts = m.group(1).split(".")
+            if len(parts) != 2:
+                return []
+
+            part0 = base64.b64decode(parts[0]).decode("latin1")
+            part1 = base64.b64decode(parts[1]).decode("latin1")
+
+            decrypted = "".join(chr(ord(part0[i]) ^ ord(part1[i % len(part1)])) for i in range(len(part0)))
+            episodes = json.loads(decrypted)
+            return episodes
+        except Exception as e:
+            if self.logger:
+                self.logger.error(f"Error decrypting WitAnime episodes: {e}")
+            return []
+
+    def _extract_witanime_stream(self, video: Video) -> Optional[str]:
+        """Extracts playable stream from WitAnime without browser driver (pure requests)."""
+        headers = dict(DEFAULT_HEADERS)
+        headers["Referer"] = "https://witanime.you/"
+
+        target_url = video.page_url
+        if "/anime/" in target_url:
+            if video.selected_episode and video.selected_episode.get("url"):
+                target_url = video.selected_episode["url"]
+            else:
+                episodes = self.get_anime_episodes(target_url)
+                video.episodes = episodes
+                if episodes:
+                    target_url = episodes[0]["url"]
+                    video.selected_episode = episodes[0]
+                else:
+                    if self.logger:
+                        self.logger.warning(f"No episodes found for WitAnime title: {video.title}")
+                    return None
+
+        if self.logger:
+            self.logger.info(f"Extracting WitAnime stream from episode: {target_url}")
+
+        try:
+            ep_resp = self.session.get(target_url, headers=headers, timeout=DEFAULT_TIMEOUT)
+            if ep_resp.status_code != 200:
+                return None
+            ep_html = ep_resp.text
+        except requests.RequestException as e:
+            if self.logger:
+                self.logger.error(f"Failed to fetch WitAnime episode page {target_url}: {e}")
+            return None
+
+        # Decode streaming servers from _zT and _zV
+        zT_match = re.search(r'var\s+_zT\s*=\s*["\']([^"\']+)["\']', ep_html)
+        zV_match = re.search(r'var\s+_zV\s*=\s*["\']([^"\']+)["\']', ep_html)
+
+        decoded_servers = []
+        if zT_match and zV_match:
+            try:
+                resources = json.loads(base64.b64decode(zT_match.group(1)).decode("utf-8"))
+                configs = json.loads(base64.b64decode(zV_match.group(1)).decode("utf-8"))
+                FRAMEWORK_HASH = "9933bd27-92ea-4ee9-807d-e612029d6318"
+
+                items = []
+                if isinstance(resources, dict) and isinstance(configs, dict):
+                    for k, v in resources.items():
+                        if k in configs:
+                            items.append((k, v, configs[k]))
+                elif isinstance(resources, list) and isinstance(configs, list):
+                    for i in range(min(len(resources), len(configs))):
+                        items.append((str(i), resources[i], configs[i]))
+
+                for key, res_val, cfg in items:
+                    try:
+                        rev = res_val[::-1]
+                        clean = re.sub(r'[^A-Za-z0-9+/=]', '', rev)
+                        k_idx = int(base64.b64decode(cfg['k']))
+                        offset = cfg['d'][k_idx]
+                        decoded_bytes = base64.b64decode(clean)
+                        url = decoded_bytes[:-offset].decode('utf-8')
+                        if "yonaplay" in url:
+                            url += "&apiKey=" + FRAMEWORK_HASH
+                        decoded_servers.append({"name": key, "url": url})
+                    except Exception:
+                        pass
+            except Exception as e:
+                if self.logger:
+                    self.logger.error(f"Error decoding WitAnime servers: {e}")
+
+        # Fallback to iframes in page
+        if not decoded_servers:
+            iframe_pattern = r'<iframe[^>]+src=["\']([^"\']+)["\']'
+            for src in re.findall(iframe_pattern, ep_html, re.IGNORECASE):
+                if src.startswith("//"):
+                    src = "https:" + src
+                decoded_servers.append({"name": "iframe", "url": src})
+
+        if self.logger:
+            self.logger.info(f"Decoded {len(decoded_servers)} streaming servers from WitAnime")
+
+        # 1. Try OK.ru first (pure HLS master playlist or MP4)
+        for s in decoded_servers:
+            u = s.get("url", "")
+            if "ok.ru" in u:
+                stream_url = self._extract_from_okru(u)
+                if stream_url:
+                    video.embed_url = u
+                    video.stream_url = stream_url
+                    return stream_url
+
+        # 2. Try StreamWish / hgcloud (Dean Edwards unpacker)
+        for s in decoded_servers:
+            u = s.get("url", "")
+            if any(host in u for host in ["hgcloud.to", "streamwish", "swish"]):
+                stream_url = self._extract_from_streamwish(u)
+                if stream_url:
+                    video.embed_url = u
+                    video.stream_url = stream_url
+                    return stream_url
+
+        # 3. Try Mp4Upload
+        for s in decoded_servers:
+            u = s.get("url", "")
+            if "mp4upload" in u:
+                stream_url = self._extract_from_mp4upload(u)
+                if stream_url:
+                    video.embed_url = u
+                    video.stream_url = stream_url
+                    return stream_url
+
+        # 4. Try Yonaplay
+        for s in decoded_servers:
+            u = s.get("url", "")
+            if "yonaplay" in u:
+                stream_url = self._extract_from_embed(u, referer="https://witanime.you/")
+                if stream_url:
+                    video.embed_url = u
+                    video.stream_url = stream_url
+                    return stream_url
+
+        # 5. Fallback to any server embed
+        for s in decoded_servers:
+            u = s.get("url", "")
+            if u.startswith("http"):
+                stream_url = self._extract_from_embed(u, referer="https://witanime.you/")
+                if stream_url:
+                    video.embed_url = u
+                    video.stream_url = stream_url
+                    return stream_url
+
+        return None
+
+    def _extract_from_okru(self, ok_url: str) -> Optional[str]:
+        """Extracts direct HLS or MP4 stream URL from OK.ru video embed."""
+        headers = {
+            "User-Agent": DEFAULT_HEADERS["User-Agent"],
+            "Referer": "https://witanime.you/",
+        }
+        try:
+            resp = self.session.get(ok_url, headers=headers, timeout=DEFAULT_TIMEOUT)
+            if resp.status_code != 200:
+                return None
+
+            m = re.search(r'data-options=["\']({.*?})["\']', resp.text)
+            if m:
+                data = json.loads(html.unescape(m.group(1)))
+                flashvars = data.get("flashvars", {})
+                meta = flashvars.get("metadata")
+                if isinstance(meta, str):
+                    try:
+                        meta = json.loads(meta)
+                    except Exception:
+                        meta = {}
+                elif not meta:
+                    meta = flashvars
+
+                # Check for master HLS playlist
+                hls_url = meta.get("hlsManifestUrl") or meta.get("hlsMasterPlaylistUrl") or data.get("hlsManifestUrl")
+                if hls_url:
+                    return hls_url
+
+                # Fallback to direct video files
+                videos = meta.get("videos", []) or flashvars.get("videos", [])
+                if videos:
+                    for v in videos:
+                        if v.get("name") in ["full", "hd"]:
+                            return v.get("url")
+                    return videos[-1].get("url")
+        except Exception as e:
+            if self.logger:
+                self.logger.debug(f"OK.ru extraction failed: {e}")
+        return None
+
+    def _extract_from_mp4upload(self, url: str) -> Optional[str]:
+        """Extracts direct video MP4 URL from Mp4Upload embed."""
+        headers = {
+            "User-Agent": DEFAULT_HEADERS["User-Agent"],
+            "Referer": "https://witanime.you/",
+        }
+        try:
+            resp = self.session.get(url, headers=headers, timeout=DEFAULT_TIMEOUT)
+            if resp.status_code != 200:
+                return None
+            for mp4 in re.findall(r'https?://[^\s"\'<>]+\.mp4[^\s"\'<>]*', resp.text):
+                if "/d/" in mp4 or "video.mp4" in mp4:
+                    return mp4
+        except Exception as e:
+            if self.logger:
+                self.logger.debug(f"Mp4Upload extraction failed: {e}")
+        return None
+
+    def _extract_from_streamwish(self, sw_url: str) -> Optional[str]:
+        """Extracts direct HLS master URL from StreamWish / hgcloud embed."""
+        headers = {
+            "User-Agent": DEFAULT_HEADERS["User-Agent"],
+            "Referer": "https://witanime.you/",
+        }
+        try:
+            resp = self.session.get(sw_url, headers=headers, timeout=DEFAULT_TIMEOUT)
+            if resp.status_code != 200:
+                return None
+
+            m3u8 = self._find_m3u8(resp.text)
+            if m3u8:
+                return m3u8
+
+            packed_match = re.search(
+                r'eval\(function\(p,a,c,k,e,d\)\{.*?\}\s*\(\s*[\'\"](.*?)[\'\"]\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*[\'\"](.*?)[\'\"]\.split\([\'\"]\s*\|\s*[\'\"]\)',
+                resp.text,
+                re.DOTALL
+            )
+            if packed_match:
+                p = packed_match.group(1)
+                a = int(packed_match.group(2))
+                c = int(packed_match.group(3))
+                k = packed_match.group(4).split('|')
+                unpacked_js = self._unpack_dean_edwards(p, a, c, k)
+                return self._find_m3u8(unpacked_js)
+        except Exception as e:
+            if self.logger:
+                self.logger.debug(f"StreamWish extraction failed: {e}")
+        return None
