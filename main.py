@@ -51,18 +51,36 @@ class EgyStreamApp:
                 continue
 
             # Selection Loop for current results
-            while True:
-                TerminalUI.display_results(videos)
-                choice = TerminalUI.prompt_choice(len(videos))
+            current_page = 1
+            page_size = 50
+            total_pages = max(1, (len(videos) + page_size - 1) // page_size)
 
-                if choice is None:  # User quit
+            while True:
+                TerminalUI.display_results(videos, page=current_page, page_size=page_size)
+                action, choice = TerminalUI.prompt_choice(
+                    total_items=len(videos),
+                    current_page=current_page,
+                    total_pages=total_pages
+                )
+
+                if action == "quit":
                     self._cleanup_proxy()
                     print("Goodbye!")
                     sys.exit(0)
 
-                if choice == -1:  # User back
+                if action == "back":
                     query = None
                     break
+
+                if action == "next":
+                    if current_page < total_pages:
+                        current_page += 1
+                    continue
+
+                if action == "prev":
+                    if current_page > 1:
+                        current_page -= 1
+                    continue
 
                 selected_video = videos[choice]
 

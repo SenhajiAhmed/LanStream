@@ -52,6 +52,9 @@ class SearchService:
         # Combine results
         combined_videos = cinejoy_videos + egystream_videos + witanime_videos
 
+        # Sort: shortest title first, maintaining stable provider relevance order
+        combined_videos.sort(key=lambda v: len(v.title.strip()))
+
         if self.logger:
             self.logger.info(
                 f"Search results: {len(cinejoy_videos)} [cineby], "
