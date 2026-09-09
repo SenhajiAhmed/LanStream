@@ -729,6 +729,14 @@ class StreamProxyHandler(http.server.BaseHTTPRequestHandler):
 
     def _serve_rewritten_playlist(self, m3u8_url: str, client_ip: str = "127.0.0.1"):
         """Fetches upstream m3u8 and rewrites internal URLs through this proxy using absolute URLs."""
+        if not m3u8_url or ".m3u8" not in m3u8_url.lower():
+            self.send_response(302)
+            self.send_header("Location", "/stream.mp4")
+            self._send_cors_headers()
+            self.end_headers()
+            self.device_logger.on_response(client_ip, self.path, 302, 0)
+            return
+
         headers = {
             "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36",
             "Referer": self.upstream_referer,
